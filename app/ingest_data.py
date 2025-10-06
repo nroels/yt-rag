@@ -1,5 +1,7 @@
 import os, psycopg2
 from datetime import datetime
+from extract_video_information import get_video_id, get_transcript, get_publish_date, get_channel_name, get_title_and_source
+import sys
 
 def get_connection():
     return psycopg2.connect(
@@ -17,6 +19,31 @@ VALUES
   (%(title)s, %(channel)s, %(published_at)s, %(lang)s, %(transcript)s, %(url)s, %(source)s, %(duration_sec)s, %(fetched_at)s, %(file_id)s, %(vector_store_id)s)
 RETURNING id;
 """
+
+def build_video_row_from_url(url: str) -> dict:
+    title, source = get_title_and_source(url)                  # title, "youtube"/"web"
+    channel = get_channel_name(url)                            # channel name
+    published_date = get_publish_date(url)                     # "YYYY-MM-DD" or None
+    video_id = get_video_id(url)                               # 11-char id or False
+    lang, transcript, duration_sec = get_transcript(video_id) if video_id else (None, None, None)
+
+    # Your videos table expects an ISO-like timestamp; your extractor returns just the date.
+    published_at = f"{published_date}T00:00:00Z" if published_date else None
+
+    return {
+        "title": title,
+        "channel": channel,
+        "published_at": published_at,
+        "lang": lang,
+        "transcript": transcript,
+        "url": url,
+        "source": source,
+        "duration_sec": duration_sec,
+        "fetched_at": None,          # let insert_video default to now()
+        "file_id": None,
+        "vector_store_id": None,
+    }
+
 def insert_video(conn, video_row: dict):
     payload = {
         "title": video_row.get("title"),
@@ -36,20 +63,15 @@ def insert_video(conn, video_row: dict):
         return cur.fetchone()[0]
 
 if __name__=="__main__":
-    con=get_connection()
-    vid = insert_video(con, {
-        "title": "My Sample Video",
-        "channel": "cool_channel",
-        "published_at": "2025-10-05T10:00:00Z",
-        "lang": "en",
-        "transcript": "Full transcript...",
-        "url": "https://www.youtube.com/watch?v=RJaHbip4qiw",
-        "source": "youtube",
-        "duration_sec": 1234,
-        # fetched_at omitted -> set to now()
-        "file_id": None,
-        "vector_store_id": None,
-    })
-    con.commit()
-    con.close()
-    print("Inserted video:", vid)
+    if len(sys.argv) < 2:
+        raise SystemExit("Usage: python ingest_data.py <youtube_url>")
+    url = sys.argv[1]
+
+    conn = get_connection()
+    try:
+        row = build_video_row_from_url(url)
+        vid_id = insert_video(conn, row)  # uses your existing insert_video()  :contentReference[oaicite:5]{index=5}
+        conn.commit()
+        print("Inserted video:", vid_id)
+    finally:
+        conn.close()
